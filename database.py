@@ -209,6 +209,7 @@ class Database:
                              data_offset & 0xFFFFFFFF)
         if field_type == ElementType.INT:
             return DBElement(field_type, 0, label, data_offset)
+        
         if field_type in (ElementType.DWORD64, ElementType.INT64):
             if data_offset + 8 > data_length:
                 raise DBException(
@@ -216,11 +217,17 @@ class Database:
                     + str(data_offset) + " exceeds field data")
             value = struct.unpack(
                 "<q", data[data_offset:data_offset + 8])[0]
+            
+            # --- NON-DESTRUCTIVE PINPOINTING ---
             if field_type == ElementType.DWORD64 and value < 0:
-                raise DBException(
-                    "DWORD64 value is too large for "
-                    "Java representation")
+                print(f"CORRUPTION PINPOINTED: Invalid DWORD64 value ({value}) found at label '{label}' (offset: {data_offset}).")
+                element = DBElement(field_type, 0, label, value)
+                element._is_corrupted_id = True 
+                return element
+                
             return DBElement(field_type, 0, label, value)
+            # -----------------------------------
+
         if field_type == ElementType.FLOAT:
             return DBElement(field_type, 0, label,
                              _int_bits_to_float(data_offset))
@@ -351,6 +358,27 @@ class Database:
                 offset += 4
                 result.add_element(
                     self._decode_field(field_index))
+
+        # --- STRUCT INSPECTION DUMP ---
+        has_corrupt = False
+        for i in range(result.element_count()):
+            el = result.get_element_at(i)
+            if getattr(el, "_is_corrupted_id", False):
+                has_corrupt = True
+                break
+                
+        if has_corrupt:
+            print(f"\n[!] Corrupted object found (Struct Index: {index}). Dumping contents:")
+            for i in range(result.element_count()):
+                el = result.get_element_at(i)
+                display_val = el.value
+                if el.type in (ElementType.LIST, ElementType.STRUCT):
+                    display_val = f"<{el.type} with {el.value.element_count()} items>"
+                elif el.type == ElementType.LSTRING:
+                    display_val = "<Localized String Object>"
+                print(f"    - {el.label} (Type {el.type}): {display_val}")
+            print("-" * 60)
+        # ------------------------------
 
         return DBElement(ElementType.STRUCT, struct_id, label,
                          result)
