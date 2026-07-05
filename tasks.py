@@ -12,7 +12,7 @@ import threading
 
 from . import context
 from .database import Database
-from .dbmodel import DBElement, ElementType
+from .dbmodel import DBElement, ElementType, DBList
 from .entries import ResourceEntry
 from .errors import DBException
 from .model import ItemTemplate, Quest
@@ -29,6 +29,41 @@ def _copy_to_file(in_stream, path):
             if not chunk:
                 break
             out.write(chunk)
+
+
+def _prune_corrupted_nodes(element):
+    """Recursively walks the database tree and removes any structs tagged as corrupted."""
+    if element is None:
+        return
+        
+    if element.type in (ElementType.STRUCT, ElementType.LIST):
+        old_list = element.value
+        if old_list is None:
+            return
+            
+        clean_elements = []
+        for i in range(old_list.element_count()):
+            child = old_list.get_element_at(i)
+            
+            # Check if this child is a STRUCT that contains our passive tag
+            is_corrupt = False
+            if child.type == ElementType.STRUCT:
+                for j in range(child.value.element_count()):
+                    if getattr(child.value.get_element_at(j), "_is_corrupted_id", False):
+                        is_corrupt = True
+                        break
+            
+            # If it's clean, keep it and recurse deeper
+            if not is_corrupt:
+                _prune_corrupted_nodes(child) 
+                clean_elements.append(child)
+                
+        # Rebuild the DBList if we removed anything
+        if len(clean_elements) != old_list.element_count():
+            new_list = DBList(len(clean_elements))
+            for el in clean_elements:
+                new_list.add_element(el)
+            element.value = new_list
 
 
 class LoadFile(threading.Thread):
@@ -161,6 +196,13 @@ class LoadFile(threading.Thread):
             context.database = database
             context.player_database = player_database
             context.smm_database = smm_database
+
+            # --- CORRUPTION CLEANUP ---
+            # Prune garbage data from the main module and player databases
+            _prune_corrupted_nodes(database.top_level_struct)
+            _prune_corrupted_nodes(player_database.top_level_struct)
+            # --------------------------
+
             self.success = True
         except DBException as exc:
             context.log_exception(
